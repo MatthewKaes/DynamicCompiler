@@ -3,6 +3,9 @@
 #include <string.h>
 #include <windows.h>
 #include <vector>
+#include <unordered_map>
+
+#include "Machine_Codes.h"
 
 #define COMPILER_VERSION "1.0.4"
 #define WORD_VARIANT 0x40
@@ -10,6 +13,9 @@
 #define NON_EXECUTABLE -2
 #define COMPILER_ERRORS -3
 #define DEFAULT_STACK_SIZE 0xFF
+#define BYTE_OP_SIZE 0x7F
+#define PAGE_SIZE 1 << 12
+
 
 unsigned char two_complement_8(unsigned char id);
 unsigned two_complement_32(unsigned id);
@@ -58,9 +64,9 @@ public:
   //==========================
   // Compiler Functionallity
   //==========================
-  AOT_Compiler(const char* name = "NULL", bool debug = false);
+  AOT_Compiler(const char* name, bool debug = false);
   //Creating Functions.
-  void Start_Function();
+  void Start_Function(const char* name = "main");
   void End_Function();
   //Creating Objects.
   void Start_Class(std::string name);
@@ -138,12 +144,11 @@ public:
   void FPU_Sin();
   void FPU_Cos();
 
-
 private:
-  
   //==========================
   // Compiler Components
   //==========================
+  enum COMPILER_ERR { N_STACK };
   struct AOT_Var
   {
     std::string name;
@@ -156,10 +161,10 @@ private:
     std::string name;
     double dec;
     float flt;
-    std::vector<BYTE*> refrence_list;
   };
   //Simple x86 register helper functions
   unsigned char Reg_to_Reg(REGISTERS dest, REGISTERS source);
+  unsigned Register_Index(REGISTERS reg);
   void Move_Register(REGISTERS dest, REGISTERS source);  
   void Load_Local_Mem(unsigned address, unsigned value, LOAD_TYPES type = CONST_LOAD);
   void Load_Local_Mem(unsigned address, REGISTERS reg = EAX);
@@ -196,6 +201,8 @@ private:
   std::vector<LINKER_Var> edp;
   //DATA Section mapping
   unsigned d_section_adr;
+  //Lookup table for function linking
+  std::unordered_map<const char*, byte*> func_loc;
 
   //==========================
   // State Management

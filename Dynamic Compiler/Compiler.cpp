@@ -10,12 +10,21 @@ unsigned two_complement_32(unsigned id)
   return (0xFFFFFFFF - id) + 1;
 }
 
-AOT_Compiler::AOT_Compiler(const char* name, bool debug) : debug_(debug), stack_size(0), d_section_adr(0),
-                                                           executable_(false), name_(name), pushed_bytes(0),
+AOT_Compiler::AOT_Compiler(const char* name, bool debug) : name_(name), debug_(debug), stack_size(0), d_section_adr(0),
+                                                           executable_(false), pushed_bytes(0),
                                                            stack_allocated(false), compiler_error(false)
 {
-  buf = (byte*)VirtualAllocEx( GetCurrentProcess(), 0, 1<<16, MEM_COMMIT, PAGE_EXECUTE_READWRITE );
-  if(debug)
+  //Obviously since these are used in direct addressing
+  //we can't have them go and reallocating themselves.
+  //When they grow we will get a copy and we don't want that.
+  esp.reserve(DEFAULT_STACK_SIZE);
+  efp.reserve(DEFAULT_STACK_SIZE);
+  edp.reserve(DEFAULT_STACK_SIZE);
+}
+void AOT_Compiler::Start_Function(const char* name)
+{
+  buf = (byte*)VirtualAllocEx( GetCurrentProcess(), 0, PAGE_SIZE, MEM_COMMIT, PAGE_EXECUTE_READWRITE );
+  if(debug_)
   {
     p = debug_buf;
   }
@@ -24,22 +33,14 @@ AOT_Compiler::AOT_Compiler(const char* name, bool debug) : debug_(debug), stack_
     p = buf;
     program.load = buf;
   }
-  //Obviously since these are used in direct addressing
-  //we can't have them go and reallocating themselves.
-  //When they grow we will get a copy and we don't want that.
-  esp.reserve(DEFAULT_STACK_SIZE);
-  efp.reserve(DEFAULT_STACK_SIZE);
-  edp.reserve(DEFAULT_STACK_SIZE);
-}
-void AOT_Compiler::Start_Function()
-{
+  func_loc[name] = p;
   //Block execution while program is being worked on.
   executable_ = false;
   stack_allocated = false;
-  *p++ = 0x52; // push edx
-  *p++ = 0x55; //push ebp
+  *p++ = PSH_EDX; // push edx
+  *p++ = PSH_EBP; //push ebp
 
-  *p++ = 0x8B;
+  *p++ = MOV;
   *p++ = 0xEC; //mov ebp, esp
 }
 void AOT_Compiler::Add_Variable(const char* name, VAR_TYPES type)
@@ -99,7 +100,7 @@ void AOT_Compiler::Cmp(ARG argument, ARG argument2)
         *p++ = two_complement_8(Local_Address(argument.var_));
         break;
       case AOT_INT:
-        if(argument.num_ > 0x7F)
+        if(argument.num_ > BYTE_OP_SIZE)
         {
           *p++ = 0x83;
           *p++ = 0x7D;
@@ -119,7 +120,7 @@ void AOT_Compiler::Cmp(ARG argument, ARG argument2)
     switch(argument2.type)
     {
       case AOT_LOCAL:
-        if(argument.num_ > 0x7F)
+        if(argument.num_ > BYTE_OP_SIZE)
         {
           *p++ = 0x83;
           *p++ = 0x7D;
@@ -154,47 +155,47 @@ void AOT_Compiler::Cmp(ARG argument, ARG argument2)
 }
 void AOT_Compiler::Jmp(const char* label)
 {
-  *p++ = 0xEB;  
+  *p++ = CODE_JMP;  
   Label_Management(label);
 }
 void AOT_Compiler::Je(const char* label)
 {
-  *p++ = 0x74;
+  *p++ = CODE_JE;
   Label_Management(label);
 }
 void AOT_Compiler::Jne(const char* label)
 {
-  *p++ = 0x75;
+  *p++ = CODE_JNE;
   Label_Management(label);
 }
 void AOT_Compiler::Jle(const char* label)
 {
-  *p++ = 0x7E;
+  *p++ = CODE_JLE;
   Label_Management(label);
 }
 void AOT_Compiler::Jl(const char* label)
 {
-  *p++ = 0x7C;
+  *p++ = CODE_JL;
   Label_Management(label);
 }
 void AOT_Compiler::Jg(const char* label)
 {
-  *p++ = 0x7F;
+  *p++ = CODE_JG;
   Label_Management(label);
 }
 void AOT_Compiler::Allocate_Stack(unsigned bytes)
 {
   stack_size += bytes;
-  if(stack_size < 0x7F)
+  if(stack_size < BYTE_OP_SIZE)
   {
     *p++ = 0x83;
-    *p++ = 0xEC;
+    *p++ = SUB_ESP;
     *p++ = (unsigned char)(stack_size);
   }
   else
   {
     *p++ = 0x81;
-    *p++ = 0xEC; //sub esp
+    *p++ = SUB_ESP; //sub esp
     (int&)p[0] = stack_size; p+= sizeof(int);
   }
   stack_allocated = true;
@@ -217,7 +218,7 @@ void AOT_Compiler::Print(ARG argument)
       *p++ = 0x08;
 
       //Load it on the stack as a double
-      *p++ = 0xDD;
+      *p++ = FPU_DOUBLE_OP;
       *p++ = 0x1C;
       *p++ = 0x24;
       pushed_bytes += 4;
@@ -282,22 +283,8 @@ void AOT_Compiler::Push(ARG argument)
   switch(argument.type)
   {
   case AOT_REG:
-    switch(argument.reg_)
-    {
-    case EAX:
-      *p++ = 0x50;
-      return;
-    case EBX:
-      *p++ = 0x53;
-      return;
-    case ECX:
-      *p++ = 0x51;
-      return;
-    case EDX:
-      *p++ = 0x52;
-      return;
-    }
-    break;
+    *p++ = REG_PSH + Register_Index(argument.reg_);
+    return;
   case AOT_LOCAL:
     address = Local_Address(argument.var_);
     if(address != -1)
@@ -309,7 +296,7 @@ void AOT_Compiler::Push(ARG argument)
         
         //Make room
         *p++ = 0x83;
-        *p++ = 0xEC;
+        *p++ = SUB_ESP;
         
         if(loc->type == _FLOAT)
         {
@@ -319,7 +306,7 @@ void AOT_Compiler::Push(ARG argument)
         else
         {
           *p++ = 0x08;
-          *p++ = 0xDD;
+          *p++ = FPU_DOUBLE_OP;
           pushed_bytes += 4;
         }
         *p++ = 0x1C;
@@ -340,7 +327,7 @@ void AOT_Compiler::Push(ARG argument)
     return;
     break;
   case AOT_INT:
-    if(abs(argument.num_) < 0x7F)
+    if(abs(argument.num_) < BYTE_OP_SIZE)
     {
       *p++ = 0x6A;
       *p++ = (unsigned char)(argument.num_);
@@ -354,36 +341,36 @@ void AOT_Compiler::Push(ARG argument)
   case AOT_DOUBLE:
 
     //Double
-    *p++ = 0xDD;
+    *p++ = FPU_DOUBLE_OP;
     *p++ = 0x05;
     (int&)p[0] = (int)Double_Address(argument.dec_); p+= sizeof(int);
 
     //Make room
     *p++ = 0x83;
-    *p++ = 0xEC;
+    *p++ = SUB_ESP;
     *p++ = 0x08;
 
     //store on stack
     //double
-    *p++ = 0xDD;
+    *p++ = FPU_DOUBLE_OP;
     *p++ = 0x1C;
     *p++ = 0x24;
     pushed_bytes += 4;
     return;
   case AOT_FLOAT:
     //Float
-    *p++ = 0xD9;
+    *p++ = FPU_FLOAT_OP;
     *p++ = 0x05;
     (int&)p[0] = (int)Float_Address(argument.flt_); p+= sizeof(int);
 
     //Make room
     *p++ = 0x83;
-    *p++ = 0xEC;
+    *p++ = SUB_ESP;
     *p++ = 0x04;
 
     //store on stack
     //Float
-    *p++ = 0xD9;
+    *p++ = FPU_FLOAT_OP;
     *p++ = 0x1C;
     *p++ = 0x24;
 
@@ -411,15 +398,15 @@ void AOT_Compiler::Pop(unsigned bytes)
   }
   if(!bytes)
   {
-    *p++ = 0x83;
-    *p++ = 0xC4;
+    *p++ = STK_POP;
+    *p++ = ADD_ESP;
     *p++ = (unsigned char)(pushed_bytes);
     pushed_bytes = 0;
   }
   else
   {
-    *p++ = 0x83;
-    *p++ = 0xC4;
+    *p++ = STK_POP;
+    *p++ = ADD_ESP;
     *p++ = (unsigned char)(bytes);
     pushed_bytes -= bytes;
   }
@@ -448,39 +435,38 @@ void AOT_Compiler::Load_Local_Mem(unsigned address, unsigned value, LOAD_TYPES t
   if(type == CONST_LOAD)
   {
     *p++ = 0xC7;
-    if(address < 0x7F)
+    if(address < BYTE_OP_SIZE)
     {
       *p++ = EAX - WORD_VARIANT;
-      *p++ = two_complement_8(address + 4);
+      *p++ = two_complement_8(address + sizeof(void*));
     }
     else
     {
       *p++ = EAX;
-      (int&)p[0] = two_complement_32(address + 4); p+= sizeof(int); //dword ptr [ebp-adr]
+      (int&)p[0] = two_complement_32(address + sizeof(void*)); p+= sizeof(int); //dword ptr [ebp-adr]
     }
     (int&)p[0] = value; p+= sizeof(int);
-    //C7 85 CC 5A FF FF 41 00 00 00 mov dword ptr [ebp-0A534h],41h 
   }
   else if(type == LOCAL_LOAD)
   {
-    *p++ = 0x8B;
-    if(address < 0x7F)
+    *p++ = MOV;
+    if(address < BYTE_OP_SIZE)
     {
       *p++ = EAX - WORD_VARIANT;
-      *p++ = two_complement_8(value + 4);
+      *p++ = two_complement_8(value + sizeof(void*));
     }
     else
     {
       *p++ = EAX;
-      (int&)p[0] = two_complement_32(value + 4); p+= sizeof(int); //dword ptr [ebp-adr]
+      (int&)p[0] = two_complement_32(value + sizeof(void*)); p+= sizeof(int); //dword ptr [ebp-adr]
     }
     Load_Local_Mem(address);
   }
 }
 void AOT_Compiler::Load_Local_Mem(unsigned address, REGISTERS reg)
 {
-  *p++ = 0x89;
-  if(address < 0x7F)
+  *p++ = MEM_LOD;
+  if(address < BYTE_OP_SIZE)
   {
     *p++ = reg - WORD_VARIANT;
     *p++ = two_complement_8(address + 4);
@@ -512,27 +498,16 @@ void AOT_Compiler::Load_Register(REGISTERS reg, ARG argument)
         *p++ = 0xC0;
         return;
       }
-      else
-      {
-        *p++ = 0xB8; // mov eax
-      }
-      break;
-    case EBX:
-      *p++ = 0xBB; // mov ebx
-      break;
-    case ECX:
-      *p++ = 0xB9; // mov ecx
-      break;
-    case EDX:
-      *p++ = 0xBA; // mov edx
+    default:
+      *p++ = REG_LOD + Register_Index(reg);
       break;
     }
     (int&)p[0] = argument.num_; p+= sizeof(int);
     return;
   case AOT_LOCAL:
-    *p++ = 0x8B;
+    *p++ = MOV;
     data = Local_Address(argument.var_);
-    if(data < 0x7F)
+    if(data < BYTE_OP_SIZE)
     {
       *p++ = reg - WORD_VARIANT;
       *p++ = two_complement_8(data + 4);
@@ -547,9 +522,10 @@ void AOT_Compiler::Load_Register(REGISTERS reg, ARG argument)
 }
 void AOT_Compiler::Move_Register(REGISTERS dest, REGISTERS source)
 {
-  *p++ = 0x8B;
+  *p++ = MOV;
   *p++ = Reg_to_Reg(dest, source);
 }
+
 void AOT_Compiler::Xchg_Register(REGISTERS dest, REGISTERS source)
 {
   if(source == dest)
@@ -558,33 +534,9 @@ void AOT_Compiler::Xchg_Register(REGISTERS dest, REGISTERS source)
     return;
   }
   //Super fast EAX xchgs
-  if(dest == EAX)
+  if(dest == EAX || source == EAX)
   {
-    switch(source)
-    {
-    case EBX:
-      *p++ = 0x93;
-      break;
-    case ECX:
-      *p++ = 0x91;
-      break;
-    case EDX:
-      *p++ = 0x92;
-    }
-  }
-  else if(source == EAX)
-  {
-    switch(dest)
-    {
-    case EBX:
-      *p++ = 0x93;
-      break;
-    case ECX:
-      *p++ = 0x91;
-      break;
-    case EDX:
-      *p++ = 0x92;
-    }
+    *p++ = EAX_XCH + Register_Index(source);
   }
   else
   {
@@ -610,44 +562,16 @@ void AOT_Compiler::Mul(REGISTERS dest, REGISTERS source)
 }
 void AOT_Compiler::Inc(REGISTERS dest)
 {
-  switch(dest)
-  {
-  case EAX:
-    *p++ = 0x40;
-    return;
-  case EBX:
-    *p++ = 0x43;
-    return;
-  case ECX:
-    *p++ = 0x41;
-    return;
-  case EDX:
-    *p++ = 0x42;
-    return;
-  }
+  *p++ = REG_INC + Register_Index(dest);
 }
 void AOT_Compiler::Dec(REGISTERS dest)
 {
-  switch(dest)
-  {
-  case EAX:
-    *p++ = 0x48;
-    return;
-  case EBX:
-    *p++ = 0x4B;
-    return;
-  case ECX:
-    *p++ = 0x49;
-    return;
-  case EDX:
-    *p++ = 0x4A;
-    return;
-  }
+  *p++ = REG_DEC + Register_Index(dest);
 }
 void AOT_Compiler::Call(void* function)
 {
   Load_Register(ECX, function);
-  *p++ = 0xFF;
+  *p++ = FAR_CALL;
   *p++ = 0xD1;
   Pop();
 }
@@ -675,11 +599,11 @@ void AOT_Compiler::Return(ARG argument)
   {
     Load_Register(EAX, argument);
   }
-  *p++ = 0x8B;
+  *p++ = MOV;
   *p++ = 0xE5; // mov esp,ebp 
-  *p++ = 0x5D; // pop ebp
-  *p++ = 0x5A; // pop edx
-  *p++ = 0xC3; // ret
+  *p++ = POP_EBP; // pop ebp
+  *p++ = POP_EDX; // pop edx
+  *p++ = RETURN; // ret
 }
 void AOT_Compiler::End_Function()
 {
@@ -720,34 +644,18 @@ const char* Get_Version()
 }
 unsigned char AOT_Compiler::Reg_to_Reg(REGISTERS dest, REGISTERS source)
 {
-  unsigned char base;
-  switch(dest)
+  return 0xC0 + 0x8 * Register_Index(dest) + Register_Index(source);
+}
+unsigned AOT_Compiler::Register_Index(REGISTERS reg)
+{
+  switch(reg)
   {
-  case EAX:
-    base = 0xC0;
-    break;
-  case EBX:
-    base = 0xD8;
-    break;
-  case ECX:
-    base = 0xC8;
-    break;
-  case EDX:
-    base = 0xD0;
-    break;
+  case EAX: return 0x00;
+  case EBX: return 0x03;
+  case ECX: return 0x01;
+  case EDX: return 0x02;
   }
-  switch(source)
-  {
-  case EAX:
-    return base; // mov eax
-  case EBX:
-    return base + 0x03; // mov ebx
-  case ECX:
-    return base + 0x01; // mov ecx
-  case EDX:
-    return base + 0x02; // mov edx
-  }
-  return NULL;
+  return 0;
 }
 int AOT_Compiler::String_Address(std::string& str)
 {
@@ -857,36 +765,36 @@ void AOT_Compiler::FPU_Load(ARG argument)
     switch(var->type)
     {
     case _FLOAT:
-      *p++ = 0xD9;
-      *p++ = 0x45;
-      *p++ = two_complement_8(Local_Address(argument.var_) + 4);
+      *p++ = FPU_FLOAT_OP;
+      *p++ = FPU_LOAD_VAR;
+      *p++ = two_complement_8(Local_Address(argument.var_) + sizeof(void*));
       return;
     case _INT:
-      *p++ = 0xDB;
-      *p++ = 0x45;
-      *p++ = two_complement_8(Local_Address(argument.var_) + 4);
+      *p++ = FPU_INT_OP;
+      *p++ = FPU_LOAD_VAR;
+      *p++ = two_complement_8(Local_Address(argument.var_) + sizeof(void*));
       return;
     case _DOUBLE:
-      *p++ = 0xDD;
-      *p++ = 0x45;
-      *p++ = two_complement_8(Local_Address(argument.var_) + 4);
+      *p++ = FPU_DOUBLE_OP;
+      *p++ = FPU_LOAD_VAR;
+      *p++ = two_complement_8(Local_Address(argument.var_) + sizeof(void*));
       return;
     }
   case AOT_FLOAT:    
-    *p++ = 0xD9;
-    *p++ = 0x05;
+    *p++ = FPU_FLOAT_OP;
+    *p++ = FPU_LOAD_ADDR;
     (int&)p[0] = (int)Float_Address(argument.flt_); p+= sizeof(int);
     return;
   case AOT_DOUBLE:    
-    *p++ = 0xDD;
-    *p++ = 0x05;
+    *p++ = FPU_DOUBLE_OP;
+    *p++ = FPU_LOAD_ADDR;
     (int&)p[0] = (int)Double_Address(argument.dec_); p+= sizeof(int);
     return;
     //FPU can't actually load integer values
     //so we need to load it as an "address":
   case AOT_INT:    
-    *p++ = 0xD9;
-    *p++ = 0x05;
+    *p++ = FPU_FLOAT_OP;
+    *p++ = FPU_LOAD_ADDR;
     (int&)p[0] = (int)Float_Address((float)argument.num_); p+= sizeof(int);
     return;
   }
@@ -897,40 +805,40 @@ void AOT_Compiler::FPU_Store(std::string name)
   switch(var->type)
   {
   case _FLOAT:
-    *p++ = 0xD9;
-    *p++ = 0x5D;
-    *p++ = two_complement_8(Local_Address(name) + 4);
+    *p++ = FPU_FLOAT_OP;
+    *p++ = FPU_PUSH;
+    *p++ = two_complement_8(Local_Address(name)  + sizeof(void*));
     return;
   case _INT:
-    *p++ = 0xDB;
-    *p++ = 0x5D;
-    *p++ = two_complement_8(Local_Address(name) + 4);
+    *p++ = FPU_INT_OP;
+    *p++ = FPU_PUSH;
+    *p++ = two_complement_8(Local_Address(name)  + sizeof(void*));
     return;
   case _DOUBLE:
-    *p++ = 0xDD;
-    *p++ = 0x5D;
-    *p++ = two_complement_8(Local_Address(name) + 4);
+    *p++ = FPU_DOUBLE_OP;
+    *p++ = FPU_PUSH;
+    *p++ = two_complement_8(Local_Address(name)  + sizeof(void*));
     return;
   }
 }
 void AOT_Compiler::FPU_Add(FPU_REGISTERS reg)
 {
-  *p++ = 0xDE;
+  *p++ = FPU_MATH;
   *p++ = 0xC0 + (unsigned)reg;
 }
 void AOT_Compiler::FPU_Sub(FPU_REGISTERS reg)
 {
-  *p++ = 0xDE;
+  *p++ = FPU_MATH;
   *p++ = 0xE8 + (unsigned)reg;
 }
 void AOT_Compiler::FPU_Mul(FPU_REGISTERS reg)
 {
-  *p++ = 0xDE;
+  *p++ = FPU_MATH;
   *p++ = 0xC8 + (unsigned)reg;
 }
 void AOT_Compiler::FPU_Div(FPU_REGISTERS reg)
 {
-  *p++ = 0xDE;
+  *p++ = FPU_MATH;
   *p++ = 0xF8 + (unsigned)reg;
 }
 void AOT_Compiler::FPU_Sqr()
@@ -940,37 +848,37 @@ void AOT_Compiler::FPU_Sqr()
 }
 void AOT_Compiler::FPU_Abs()
 {
-  *p++ = 0xD9;
+  *p++ = FPU_FLOAT_OP;
   *p++ = 0xE1;
 }
 void AOT_Compiler::FPU_Root()
 {
-  *p++ = 0xD9;
+  *p++ = FPU_FLOAT_OP;
   *p++ = 0xFA;
 }
 void AOT_Compiler::FPU_One()
 {
-  *p++ = 0xD9;
+  *p++ = FPU_FLOAT_OP;
   *p++ = 0xE8;
 }
 void AOT_Compiler::FPU_Zero()
 {
-  *p++ = 0xD9;
+  *p++ = FPU_FLOAT_OP;
   *p++ = 0xEE;
 }
 void AOT_Compiler::FPU_PI()
 {
-  *p++ = 0xD9;
+  *p++ = FPU_FLOAT_OP;
   *p++ = 0xEB;
 }
 void AOT_Compiler::FPU_Xchg()
 {
-  *p++ = 0xD9;
+  *p++ = FPU_FLOAT_OP;
   *p++ = 0xC9;
 }
 void AOT_Compiler::FPU_Invert()
 {
-  *p++ = 0xD9;
+  *p++ = FPU_FLOAT_OP;
   *p++ = 0xE0;
 }
 void AOT_Compiler::FPU_Neg()
@@ -980,16 +888,16 @@ void AOT_Compiler::FPU_Neg()
 }
 void AOT_Compiler::FPU_Round()
 {
-  *p++ = 0xD9;
+  *p++ = FPU_FLOAT_OP;
   *p++ = 0xFC;
 }
 void AOT_Compiler::FPU_Sin()
 {
-  *p++ = 0xD9;
+  *p++ = FPU_FLOAT_OP;
   *p++ = 0xFE;
 }
 void AOT_Compiler::FPU_Cos()
 {
-  *p++ = 0xD9;
+  *p++ = FPU_FLOAT_OP;
   *p++ = 0xFF;
 }
