@@ -654,6 +654,8 @@ unsigned AOT_Compiler::Register_Index(REGISTERS reg)
   case EBX: return 0x03;
   case ECX: return 0x01;
   case EDX: return 0x02;
+  case ESI: return 0x06;
+  case EDI: return 0x07;
   }
   return 0;
 }

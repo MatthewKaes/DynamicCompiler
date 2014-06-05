@@ -21,7 +21,7 @@ unsigned char two_complement_8(unsigned char id);
 unsigned two_complement_32(unsigned id);
 
 enum RETURN_TYPES { VOID_RETURN, CONST_RETURN, LOCAL_RETURN };
-enum REGISTERS : unsigned char { EAX = 0x85, EBX = 0x9D, ECX = 0x8D, EDX = 0x95 };
+enum REGISTERS : unsigned char { EAX = 0x85, EBX = 0x9D, ECX = 0x8D, EDX = 0x95, ESI = 0xB5, EDI = 0xBD };
 enum LOAD_TYPES { LOCAL_LOAD, CONST_LOAD, REG_LOAD };
 enum ARG_TYPES { AOT_LOCAL, AOT_INT, AOT_MEMORY, AOT_FLOAT, AOT_DOUBLE, AOT_REG };
 enum VAR_TYPES { _INT, _FLOAT, _DOUBLE };
